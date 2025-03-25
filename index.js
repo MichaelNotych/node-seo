@@ -1,7 +1,8 @@
+const fs = require("fs");
 const { getStatus } = require("./src/services/undetectable");
-const { processTasksFile } = require("./src/tasks");
+const { parseTasksFile } = require("./src/tasks");
 
-const TASK_PATH = "./tasks/task.txt";
+const TASK_PATH = "tasks/task.txt";
 
 // Main function
 async function main() {
@@ -10,7 +11,9 @@ async function main() {
 		return;
 	}
 
-	processTasksFile(TASK_PATH);
+	const taskTxt = fs.readFileSync(TASK_PATH, "utf-8");
+
+	parseTasksFile(taskTxt);
 }
 
 main().catch(console.error);

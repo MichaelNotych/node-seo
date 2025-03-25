@@ -1,17 +1,17 @@
-const fs = require("fs");
 const { shuffleArray } = require("./helpers");
-const { connectToBrowser, newPage, doSearch, getSearchItems } = require("./services/puppeteer");
+const { connectToBrowser, newPage, doSearch, getSearchItems: getSearchItem, checkCaptcha, updateRegion, visitWebsite } = require("./services/puppeteer");
 const { getProfiles, startProfile } = require("./services/undetectable");
 
-async function processTasksFile(path) {
-	const taskTxt = fs.readFileSync(path, "utf-8");
+const START_PAGE_URL = 'https://mail.ru/search?text&search_source=mailru_desktop_simple&msid=1&serp_path=%2Fsearch%2F&type=web';
+
+async function parseTasksFile(taskTxt) {
 	const tasks = taskTxt.split('\n');
 	const groups = {};
 
 	// формируем по каждой группе объект вида
 	// { requestsLimit: number, tasks: [{ url: string, request: string, additionalRequest: string }] }
 	for (let i = 0; i < tasks.length; i++) {
-		const [group, requestsLimit, url, request, additionalRequest] = tasks[i].split(';');
+		const [group, requestsLimit, url, request, additionalRequest, lr] = tasks[i].split(';');
 
 		if (!groups[group]) {
 			groups[group] = {
@@ -20,7 +20,7 @@ async function processTasksFile(path) {
 				tasks: [],
 			}
 		}
-		groups[group].tasks.push({ url, request, additionalRequest });
+		groups[group].tasks.push({ url, request, additionalRequest, lr });
 	}
 
 	// перемешиваем массивы задач
@@ -46,21 +46,20 @@ async function processTasksFile(path) {
 		console.log(allGroupTasks);
 
 		for (let i = 0; i < group.tasks.length; i++) {
-			const { url, request, additionalRequest } = group.tasks[i];
-			console.log(`processing task: ${url}, request: ${request}, additionalRequest: ${additionalRequest}`);
-			await processTask(url, request, additionalRequest);
+			console.log('process task:');
+			console.log(group.tasks[i]);
+			await processTask(group.tasks[i]);
 		}
 	}
 }
 
 /**
  * Обработка задачи
- * @param {string} url - адрес страницы
- * @param {string} request - строка поиска
- * @param {string} additionalRequest - дополнительный поисковый запрос
+ * @param {Object} task
  * @returns {Promise<void>}
  */
-async function processTask(url, request, additionalRequest) {
+async function processTask(task) {
+	const { url, request, additionalRequest, lr } = task;
 	// получаем список профилей
 	const profiles = await getProfiles();
 
@@ -73,53 +72,52 @@ async function processTask(url, request, additionalRequest) {
 	const profile = await startProfile(currentProfileId);
 	// подключаемся к хрому
 	const browser = await connectToBrowser(profile.websocket_link);
-	// переходим в поисковик
-	const page = await newPage(browser, "https://mail.ru/");
-	// делаем поиск по первичному запросу
-	let resultFrame = await doSearch(request, page, true);
-	// если фрейма нет, то выходим из цикла
-	if (!resultFrame) {
-		console.log('Iframe not found or not accessible.');
-		await browser.close();
-		return;
-	}
 
-	// в фрейме запускаем js код
-	// который проходится по каждому поисковому элементу
-	// и собирает данные: заголовок, описание, ссылка
-	let resultItems = await getSearchItems(resultFrame);
+	try {
+		// переходим в поисковик
+		const page = await newPage(browser, START_PAGE_URL);
+		// обновляем регион
+		console.log('set region')
+		await updateRegion(page, lr);
 
-	// проходимся по всем результатам и ищем нужную ссылку
-	let itemToSearchIndex = null;
-	let itemToSearch = resultItems.find((item, index) => {
-		if (item.url.includes(url)) {
-			itemToSearchIndex = index;
+		const pageHasCaptcha = await checkCaptcha(page);
+		if (pageHasCaptcha) return console.log('pageHasCaptcha', pageHasCaptcha)
+		// делаем поиск по первичному запросу
+		let resultFrame = await doSearch(request, page);
+		// если фрейма нет, то выходим из цикла
+		if (!resultFrame) {
+			throw new Error('Iframe not found or not accessible.');
 		}
-		return item.url.includes(url);
-	});
 
-	// если нет нужной ссылки, то делаем 
-	// догугливание в поиске
-	if (!itemToSearch) {
-		console.log('apply additional request')
-		resultFrame = await doSearch(`${request} ${additionalRequest}`, page);
-		resultItems = await getSearchItems(resultFrame);
+		// в фрейме запускаем js код
+		// который проходится по каждому поисковому элементу
+		// и собирает данные: заголовок, описание, ссылка
+		let searchItem = await getSearchItem(resultFrame, url);
 
-		itemToSearch = resultItems.find((item, index) => {
-			if (item.url.includes(url)) {
-				itemToSearchIndex = index;
-			}
-			return item.url.includes(url);
-		});
+		// если нет нужной ссылки, то делаем 
+		// догугливание в поиске
+		if (!searchItem.item) {
+			console.log('apply additional request')
+			resultFrame = await doSearch(` ${additionalRequest}`, page);
+			searchItem = await getSearchItem(resultFrame, url);
+		}
+
+		if (!searchItem.item) {
+			throw new Error('Target item not found.');
+		}
+
+		console.log(`target item (index in result: ${searchItem.index}):`, searchItem.item);	
+
+		await visitWebsite(page, url, browser);
+
+	} catch (error) {
+		console.log('## ERROR', error.message);
+	} finally {
+		await sleep(2000);
+		await browser.close();
 	}
-
-	console.log(`target item (index in result: ${itemToSearchIndex}):`, itemToSearch);
-
-	//console.log('other results', resultItems);
-
-	await browser.close();
 }
 
 module.exports = {
-	processTasksFile,
+	parseTasksFile,
 };
